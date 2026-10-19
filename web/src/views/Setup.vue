@@ -35,7 +35,7 @@
       <h2>连接 TeamSpeak 服务器</h2>
       <div class="form-group">
         <label>服务器地址</label>
-        <input v-model="serverAddress" placeholder="ts.example.com" class="input" />
+        <input v-model="serverAddress" placeholder="ts.example.com 或 主机:端口" class="input" />
       </div>
       <div class="form-group">
         <label>端口</label>

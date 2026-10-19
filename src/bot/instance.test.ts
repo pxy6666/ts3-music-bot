@@ -137,6 +137,7 @@ describe("BotInstance voice-ducking lifecycle integration", () => {
       lifecycleGeneration: 0,
       idleTimer: null,
       _cancelIdleTimer: (BotInstance.prototype as any)._cancelIdleTimer,
+      _cancelReconnect: (BotInstance.prototype as any)._cancelReconnect,
       tsClient: {
         connect: vi.fn(() => connectPromise),
         getResolvedVoiceEndpoint: vi.fn(() => ({ host: "203.0.113.20", port: 12000 })),
@@ -1625,6 +1626,8 @@ describe("cmdPlaylist with a playlist link (#160)", () => {
       queue: { clear: vi.fn(), add: (s: any) => queued.push(s), play: () => queued[0] },
       disableFmMode: vi.fn(),
       withRequester: (s: any) => s,
+      shouldShuffleCollection: () => false,
+      commitCollection: (BotInstance.prototype as any).commitCollection,
       resolveAndPlay: vi.fn(async () => true),
       sweepLocalAudio: vi.fn(),
       emit: vi.fn(),

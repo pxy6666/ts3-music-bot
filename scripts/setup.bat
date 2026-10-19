@@ -49,7 +49,7 @@ echo.
 call :step "1/7" "Checking Node.js"
 
 where node >nul 2>&1
-if not errorlevel 1 goto :check_node_version
+if not errorlevel 1 goto :maybe_portable_node
 
 call :error "Node.js not found in PATH."
 echo.
@@ -59,6 +59,27 @@ echo   https://nodejs.cn/   (China mirror, recommended)
 echo.
 pause
 exit /b 1
+
+:: Node 24 has no prebuilt @discordjs/opus. Download Node 22 into .node
+:: and run the rest of setup with it, so Visual Studio is not required.
+:maybe_portable_node
+if "%TSMB_PORTABLE%"=="1" goto :check_node_version
+echo Checking whether a portable Node 22 is needed...
+node scripts\use-node22.mjs > "%TEMP%\tsmb-node-home.txt"
+if errorlevel 1 (
+    call :error "Could not prepare Node 22. See the messages above."
+    pause
+    exit /b 1
+)
+set /p NODEHOME=<"%TEMP%\tsmb-node-home.txt"
+if "%NODEHOME%"=="SYSTEM" goto :check_node_version
+echo [INFO] This Node has no ready-made opus package.
+echo        Using portable Node 22:
+echo        %NODEHOME%
+set "PATH=%NODEHOME%;%PATH%"
+set "TSMB_PORTABLE=1"
+call "%~f0"
+exit /b !errorlevel!
 
 :check_node_version
 for /f "delims=" %%v in ('node --version 2^>nul') do set "NODE_VER=%%v"

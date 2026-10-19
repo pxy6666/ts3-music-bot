@@ -391,3 +391,40 @@ describe("occupancy responses belong to the current request and connection", () 
     expect(bot.idleTimer).not.toBeNull();
   });
 });
+
+describe("reconnect after a drop", () => {
+  it("reconnects into the channel the bot was moved to", async () => {
+    const bot = makeBot();
+    bot.tsClient.preferChannel = vi.fn();
+    bot.tsClient.getClientId = () => 7;
+    bot.tsClient.emit("clientMoved", { id: 7, targetChannelID: 99n });
+    bot.tsClient.emit("disconnected");
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(bot.tsClient.connect).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(bot.tsClient.preferChannel).toHaveBeenCalledWith("99");
+    expect(bot.connected).toBe(true);
+  });
+
+  it("does not reconnect after an intentional disconnect", async () => {
+    const bot = makeBot();
+    bot.disconnect();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(bot.tsClient.connect).not.toHaveBeenCalled();
+  });
+
+  it("waits longer after a failed attempt", async () => {
+    const bot = makeBot();
+    bot.tsClient.connect
+      .mockRejectedValueOnce(new Error("network down"))
+      .mockImplementationOnce(async () => { bot.tsClient.emit("connected"); });
+    bot.tsClient.emit("disconnected");
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(bot.tsClient.connect).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(3_999);
+    expect(bot.tsClient.connect).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(bot.tsClient.connect).toHaveBeenCalledTimes(2);
+    expect(bot.connected).toBe(true);
+  });
+});

@@ -1,3 +1,15 @@
+/** 复制一份再打乱，不改动调用方手里的原数组。歌单追加进队列时用。 */
+export function shuffleItems<T>(items: readonly T[]): T[] {
+  const copy = items.slice();
+  for (let i = copy.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const tmp = copy[i];
+    copy[i] = copy[j];
+    copy[j] = tmp;
+  }
+  return copy;
+}
+
 export enum PlayMode {
   Sequential = "seq",
   Loop = "loop",
@@ -314,6 +326,67 @@ export class PlayQueue {
 
   getCurrentIndex(): number {
     return this.currentIndex;
+  }
+
+  /**
+   * 打乱 [start, end) 这一段的歌曲顺序。
+   * 落在这段里的 currentIndex、已播标记、历史和前进栈会跟着歌曲一起搬家，段外的下标不动。
+   * 用来实现「随机模式下，只打乱刚加进去的歌单或专辑」。
+   */
+  shuffleRange(start: number, end: number): void {
+    const n = this.songs.length;
+    const from = Math.max(0, start);
+    const to = Math.min(n, end);
+    const span = to - from;
+    if (span <= 1) return;
+
+    const oldOffsetAtNewPos = Array.from({ length: span }, (_, i) => i);
+    for (let i = span - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      const tmp = oldOffsetAtNewPos[i];
+      oldOffsetAtNewPos[i] = oldOffsetAtNewPos[j];
+      oldOffsetAtNewPos[j] = tmp;
+    }
+
+    const oldSlice = this.songs.slice(from, to);
+    const newSlice = oldOffsetAtNewPos.map((oldOffset) => oldSlice[oldOffset]);
+    this.songs.splice(from, span, ...newSlice);
+
+    const mapIndex = (idx: number): number => {
+      if (idx < from || idx >= to) return idx;
+      const newOffset = oldOffsetAtNewPos.indexOf(idx - from);
+      return from + newOffset;
+    };
+    if (this.currentIndex >= 0) this.currentIndex = mapIndex(this.currentIndex);
+    this.playedIndices = new Set([...this.playedIndices].map(mapIndex));
+    this.history = this.history.map(mapIndex);
+    this.forwardStack = this.forwardStack.map(mapIndex);
+  }
+
+  /**
+   * 打乱还没轮到的歌。正在播放的那首留在原位。
+   * 队列还没开始播时，打乱整列。
+   * 随机 / 随机循环下，接下来会按打乱后的列表顺序往下播，而不是重新抽一张。
+   */
+  shuffleUpcoming(): void {
+    if (this.songs.length <= 1) return;
+    if (this.currentIndex < 0) this.shuffleRange(0, this.songs.length);
+    else this.shuffleRange(this.currentIndex + 1, this.songs.length);
+    this.followUnplayedListOrder();
+  }
+
+  /**
+   * 随机模式下，让下一首按「当前这首后面的列表顺序」走。
+   * 前进栈从末尾弹出，所以这里倒着放，播出来才是从左到右。
+   */
+  followUnplayedListOrder(): void {
+    if (this.mode !== PlayMode.Random && this.mode !== PlayMode.RandomLoop) return;
+    const pending: number[] = [];
+    const startFrom = this.currentIndex < 0 ? 0 : this.currentIndex + 1;
+    for (let i = startFrom; i < this.songs.length; i++) {
+      if (!this.playedIndices.has(i)) pending.push(i);
+    }
+    this.forwardStack = pending.reverse();
   }
 
   /** Number of songs not yet played in Random mode. */

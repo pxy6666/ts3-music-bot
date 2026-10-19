@@ -14,6 +14,27 @@ export const ADMIN_COMMANDS = new Set([
   "stop", "clear", "remove", "move", "vol", "mode",
 ]);
 
+/**
+ * 指令名用英文。下面是拼音别名，方便不打英文单词。
+ * 用户在配置里写的别名会盖过同名项。
+ */
+export const BUILTIN_COMMAND_ALIASES: Record<string, string> = {
+  p: "play",
+  s: "skip",
+  n: "next",
+  bofang: "play",
+  tianjia: "add",
+  xiayishou: "next",
+  moshi: "mode",
+  gedan: "playlist",
+  zhuanji: "album",
+  yinyuan: "source",
+  daluan: "shuffle",
+  liebiao: "queue",
+  tianjiagedan: "addplaylist",
+  tianjiazhuanji: "addalbum",
+};
+
 export function parseCommand(
   message: string,
   prefix: string,
@@ -28,8 +49,9 @@ export function parseCommand(
   const parts = withoutPrefix.split(/\s+/);
   let name = parts[0].toLowerCase();
 
-  if (aliases[name]) {
-    name = aliases[name];
+  const merged = { ...BUILTIN_COMMAND_ALIASES, ...aliases };
+  if (merged[name]) {
+    name = merged[name];
   }
 
   const flags = new Set<string>();

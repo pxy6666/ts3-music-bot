@@ -154,7 +154,7 @@
           </div>
           <div class="form-group">
             <label>服务器地址</label>
-            <input v-model="editForm.serverAddress" class="input" placeholder="ts.example.com" />
+            <input v-model="editForm.serverAddress" class="input" placeholder="ts.example.com 或 主机:端口" />
           </div>
           <div class="form-row">
             <div class="form-group" style="flex:1">
@@ -220,7 +220,7 @@
               <div class="create-field-grid create-server-grid">
                 <div class="form-group">
                   <label for="new-bot-server">服务器地址</label>
-                  <input id="new-bot-server" v-model="newBotServer" class="input" placeholder="localhost 或 ts.example.com" />
+                  <input id="new-bot-server" v-model="newBotServer" class="input" placeholder="localhost、ts.example.com，或 主机:端口" />
                 </div>
                 <div class="form-group">
                   <label for="new-bot-port">端口</label>
@@ -944,8 +944,8 @@
 
       <label class="profile-toggle behavior-toggle">
         <div class="profile-toggle-text">
-          <div class="profile-toggle-label">保存/加载播放清单（含重启后自动恢复队列）</div>
-          <div class="profile-toggle-hint">开启后可在网页与聊天命令（!save / !load / !queues）保存和加载播放清单，并在机器人重启后自动恢复并继续播放上次的队列。重启只能从当前曲目的开头恢复（不记忆进度）；Spotify 恢复为尽力而为。默认关闭。</div>
+          <div class="profile-toggle-label">保存/加载播放清单（含重连后接着播）</div>
+          <div class="profile-toggle-hint">开启后可在网页与聊天命令（!save / !load / !queues）保存和加载播放清单。断网、被踢或重启后自动重连时，会从当前这首的开头继续播。不记忆播放进度；Spotify 恢复为尽力而为。默认关闭。重连本身不需要打开这个开关。</div>
         </div>
         <input
           v-model="savedQueuesEnabled"

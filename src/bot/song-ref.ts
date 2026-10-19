@@ -106,6 +106,36 @@ export interface PlaylistRef {
   platform: "netease" | "qq" | "youtube";
 }
 
+export interface AlbumRef {
+  id: string;
+  platform: "netease" | "qq";
+}
+
+/**
+ * 专辑网页或分享文案。平台从链接本身判断，这样默认音源是网易云时，
+ * 贴一条 QQ 专辑链接也不会走错。
+ * 名字和纯数字 id 返回 null，交给原来的搜索。
+ */
+export function parseAlbumRef(raw: string): AlbumRef | null {
+  const q = stripUrlBBCode(raw ?? "").trim();
+  if (!q || !/album/i.test(q)) return null;
+
+  if (/music\.163\.com/i.test(q)) {
+    const m = /[?&#]id=(\d+)/.exec(q) ?? /\/album\/(\d+)/.exec(q);
+    if (m) return { id: m[1], platform: "netease" };
+  }
+
+  if (/y\.qq\.com/i.test(q)) {
+    const m =
+      /albumDetail\/([0-9A-Za-z]+)/.exec(q) ??
+      /\/album\/([0-9A-Za-z]+)/.exec(q) ??
+      /[?&]albummid=([0-9A-Za-z]+)/i.exec(q);
+    if (m) return { id: m[1], platform: "qq" };
+  }
+
+  return null;
+}
+
 /** Drop the [URL]…[/URL] BBCode the TeamSpeak client wraps around pasted links. */
 function stripUrlBBCode(text: string): string {
   return text.replace(/\[\/?url(?:=[^\]]*)?\]/gi, " ");
@@ -121,7 +151,8 @@ export function parsePlaylistRef(raw: string): PlaylistRef | null {
   const q = stripUrlBBCode(raw ?? "").trim();
   if (!q) return null;
 
-  if (/music\.163\.com/i.test(q)) {
+  // 必须带 playlist。专辑链接也是 music.163.com?id=，不能当成歌单。
+  if (/music\.163\.com/i.test(q) && /playlist/i.test(q)) {
     const m = /[?&#/]id=(\d+)/.exec(q) ?? /\/playlist\/(\d+)/.exec(q);
     if (m) return { id: m[1], platform: "netease" };
   }

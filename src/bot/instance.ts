@@ -6,8 +6,9 @@ import {
   type TS3VoiceActivity,
   type TS3VoiceSendFailure,
 } from "../ts-protocol/client.js";
+import { resolveTeamSpeakEndpoint } from "../ts-protocol/server-address.js";
 import { AudioPlayer } from "../audio/player.js";
-import { PlayQueue, PlayMode, type QueuedSong } from "../audio/queue.js";
+import { PlayQueue, PlayMode, shuffleItems, type QueuedSong } from "../audio/queue.js";
 import type { MusicProvider, Platform, Song } from "../music/provider.js";
 import {
   parseCommand,
@@ -18,6 +19,7 @@ import {
   parseSongRef,
   parseSelectionIndex,
   parsePlaylistRef,
+  parseAlbumRef,
   findShareShortLink,
   resolveShareLink,
 } from "./song-ref.js";
@@ -27,7 +29,9 @@ import { SHARED_QUEUE_OWNER, type BotDatabase, type ProfileConfig, type StoredSo
 import {
   isProviderEnabled,
   defaultPlatform,
+  saveConfig,
   type BotConfig,
+  type GateableProvider,
   type SpotifyConfig,
   type VoiceDuckingConfig,
 } from "../data/config.js";
@@ -61,6 +65,27 @@ const PLAY_MODE_BY_VALUE: Record<string, PlayMode> = {
   loop: PlayMode.Loop,
   random: PlayMode.Random,
   rloop: PlayMode.RandomLoop,
+};
+
+/** 模式参数用英文或拼音。值必须是 PLAY_MODE_BY_VALUE 的键。 */
+const PLAY_MODE_INPUT: Record<string, string> = {
+  seq: "seq",
+  sequential: "seq",
+  shunxu: "seq",
+  loop: "loop",
+  xunhuan: "loop",
+  shunxuxunhuan: "loop",
+  random: "random",
+  suiji: "random",
+  rloop: "rloop",
+  suijixunhuan: "rloop",
+};
+
+const SOURCE_INPUT: Record<string, "netease" | "qq"> = {
+  netease: "netease",
+  wangyiyun: "netease",
+  wy: "netease",
+  qq: "qq",
 };
 
 // Keep a disconnected bot id classified as managed briefly so UDP packets
@@ -117,6 +142,8 @@ export interface BotInstanceOptions {
   jellyfinProvider?: MusicProvider;
   database: BotDatabase;
   config: BotConfig;
+  /** 有值时，!音源 会写回 config.json，重启后还是这个音源。 */
+  configPath?: string;
   logger: Logger;
   avatarStore: AvatarStore;
   /** Shared across one manager so its bots do not trigger one another. */
@@ -180,6 +207,7 @@ export class BotInstance extends EventEmitter {
   private jellyfinProvider: MusicProvider;
   private database: BotDatabase;
   private config: BotConfig;
+  private configPath: string | undefined;
   private logger: Logger;
   private avatarStore: AvatarStore;
   private connected = false;
@@ -211,6 +239,12 @@ export class BotInstance extends EventEmitter {
   private jellyfinReporter: JellyfinPlaybackReporter | null = null;
   /** Debounce handle for the live-queue snapshot writer (Feature 2, #119). */
   private snapshotTimer: ReturnType<typeof setTimeout> | null = null;
+  /** True after an intentional disconnect (stop button, idle timeout, shutdown). */
+  private suppressReconnect = false;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectAttempt = 0;
+  /** Channel the bot was in, so a drop reconnects there instead of the lobby. */
+  private lastChannelId: string | null = null;
 
   constructor(options: BotInstanceOptions) {
     super();
@@ -226,10 +260,13 @@ export class BotInstance extends EventEmitter {
     this.jellyfinProvider = options.jellyfinProvider ?? options.neteaseProvider;
     this.database = options.database;
     this.config = options.config;
+    this.configPath = options.configPath;
     this.logger = options.logger.child({ botId: this.id });
     this.avatarStore = options.avatarStore;
 
-    this.tsClient = new TS3Client(options.tsOptions, this.logger);
+    const voiceEndpoint = resolveTeamSpeakEndpoint(options.tsOptions.host, options.tsOptions.port);
+    const tsOptions = { ...options.tsOptions, host: voiceEndpoint.host, port: voiceEndpoint.port };
+    this.tsClient = new TS3Client(tsOptions, this.logger);
     this.player = new AudioPlayer(this.logger);
     this.voiceDucking = new VoiceDuckingController(
       this.player,
@@ -238,8 +275,8 @@ export class BotInstance extends EventEmitter {
     this.managedVoiceClients =
       options.managedVoiceClients ?? new ManagedVoiceClientRegistry();
     this.configuredVoiceServerScope = {
-      host: options.tsOptions.host,
-      voicePort: options.tsOptions.port,
+      host: voiceEndpoint.host,
+      voicePort: voiceEndpoint.port,
     };
     this.voiceServerScope = { ...this.configuredVoiceServerScope };
     this.queue = new PlayQueue();
@@ -478,6 +515,7 @@ export class BotInstance extends EventEmitter {
       if (this.disconnectEmitted) return;
       this.disconnectEmitted = true;
       this.emit("disconnected");
+      this.scheduleReconnect("connection lost");
     });
 
     this.tsClient.on("connected", () => {
@@ -517,6 +555,7 @@ export class BotInstance extends EventEmitter {
     });
     this.tsClient.on("clientMoved", (event: { id: number; targetChannelID: bigint }) => {
       if (event.id === this.tsClient.getClientId()) {
+        this.lastChannelId = event.targetChannelID.toString();
         // Moving the bot invalidates every activity deadline from its old
         // channel even if no individual leave events arrive.
         this.voiceDucking.reset(false);
@@ -612,8 +651,11 @@ export class BotInstance extends EventEmitter {
 
   async connect(): Promise<void> {
     this.lifecycleGeneration++;
+    this.suppressReconnect = false;
+    this._cancelReconnect();
     this._cancelIdleTimer();
     this.disconnectEmitted = false;
+    if (this.lastChannelId) this.tsClient.preferChannel?.(this.lastChannelId);
     await this.tsClient.connect();
     const resolvedEndpoint = this.tsClient.getResolvedVoiceEndpoint();
     this.voiceServerScope = {
@@ -630,6 +672,8 @@ export class BotInstance extends EventEmitter {
       throw new Error("Connect aborted by concurrent disconnect");
     }
     this.connected = true;
+    const channelId = this.tsClient.getChannelId?.() ?? 0n;
+    if (channelId > 0n) this.lastChannelId = channelId.toString();
     // Register only after the outer lifecycle race guard succeeds. The TS
     // wrapper emits its own "connected" event before connect() resolves, so
     // registering in that callback could let a cancelled, late handshake
@@ -645,6 +689,8 @@ export class BotInstance extends EventEmitter {
   }
 
   disconnect(): void {
+    this.suppressReconnect = true;
+    this._cancelReconnect();
     this.lifecycleGeneration++;
     this._cancelIdleTimer();
     this.voiceDucking.reset(true);
@@ -786,6 +832,42 @@ export class BotInstance extends EventEmitter {
     }
   }
 
+  private _cancelReconnect(): void {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+  }
+
+  /** Network drop and kick. Stop, idle timeout, and shutdown set suppressReconnect. */
+  private scheduleReconnect(reason: string): void {
+    if (this.suppressReconnect || this.reconnectTimer) return;
+    if (!Number.isInteger(this.reconnectAttempt) || this.reconnectAttempt < 0) {
+      this.reconnectAttempt = 0;
+    }
+    const delay = Math.min(30_000, 2_000 * 2 ** Math.min(this.reconnectAttempt, 4));
+    this.reconnectAttempt++;
+    this.logger.warn(
+      { delayMs: delay, attempt: this.reconnectAttempt, reason },
+      "TeamSpeak connection lost; reconnecting",
+    );
+    const generation = this.lifecycleGeneration;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (this.suppressReconnect || this.lifecycleGeneration !== generation) return;
+      this.connect()
+        .then(() => {
+          this.reconnectAttempt = 0;
+          this.logger.info("Reconnected to TeamSpeak");
+        })
+        .catch((err) => {
+          this.logger.warn({ err }, "Reconnect failed");
+          this.scheduleReconnect("retry");
+        });
+    }, delay);
+    this.reconnectTimer.unref?.();
+  }
+
   private async handleTextMessage(msg: TS3TextMessage): Promise<void> {
     const parsed = parseCommand(
       msg.message,
@@ -888,6 +970,8 @@ export class BotInstance extends EventEmitter {
       "prev",
       "playlist",
       "album",
+      "addplaylist",
+      "addalbum",
       "fm",
       "artist",
     ]);
@@ -930,9 +1014,17 @@ export class BotInstance extends EventEmitter {
       case "mode":
         return this.cmdMode(cmd);
       case "playlist":
-        return this.cmdPlaylist(cmd, requesterName);
+        return this.cmdPlaylist(cmd, requesterName, "replace");
       case "album":
-        return this.cmdAlbum(cmd, requesterName);
+        return this.cmdAlbum(cmd, requesterName, "replace");
+      case "addplaylist":
+        return this.cmdPlaylist(cmd, requesterName, "append");
+      case "addalbum":
+        return this.cmdAlbum(cmd, requesterName, "append");
+      case "source":
+        return this.cmdSource(cmd);
+      case "shuffle":
+        return this.cmdShuffle();
       case "fm":
         return this.cmdFm(cmd, requesterName);
       case "artist":
@@ -1685,18 +1777,78 @@ export class BotInstance extends EventEmitter {
   }
 
   private cmdMode(cmd: ParsedCommand): string {
-    const mode = PLAY_MODE_BY_VALUE[cmd.args];
+    const canonical = PLAY_MODE_INPUT[cmd.args.trim()] ?? PLAY_MODE_INPUT[cmd.args.trim().toLowerCase()];
+    const mode = canonical ? PLAY_MODE_BY_VALUE[canonical] : undefined;
     if (mode === undefined) return "Usage: !mode <seq|loop|random|rloop>";
     this.queue.setMode(mode);
     // Persist so the play mode survives a restart (#125). The chat !mode command
     // and the WebUI/REST mode endpoint both funnel through here.
     this.persistPlayMode();
     this.emit("stateChange");
-    return `Play mode set to: ${cmd.args}`;
+    return `Play mode set to: ${canonical}`;
   }
 
-  private async cmdPlaylist(cmd: ParsedCommand, requesterName?: string): Promise<string> {
-    if (!cmd.args) return "Usage: !playlist <playlist name, ID or link>";
+  /** 随机、随机循环时，歌单和专辑放进队列前先打乱这一段。单曲不加乱。 */
+  private shouldShuffleCollection(): boolean {
+    const mode = this.queue.getMode();
+    return mode === PlayMode.Random || mode === PlayMode.RandomLoop;
+  }
+
+  /**
+   * replace：清掉当前队列再播，和原来的 !playlist / !album 一样。
+   * append：接到队列末尾。没在播的话从新加的第一首开始。
+   * 随机模式下只打乱这次加进去的歌，原来队列里的顺序不动。
+   */
+  private async commitCollection(
+    songs: Song[],
+    provider: MusicProvider,
+    requesterName: string | undefined,
+    how: "replace" | "append",
+  ): Promise<string> {
+    const incoming = this.shouldShuffleCollection() ? shuffleItems(songs) : songs;
+    const tagged = incoming.map((song) =>
+      this.withRequester({ ...song, platform: provider.platform }, requesterName),
+    );
+
+    if (how === "replace") {
+      this.player.stop();
+      this.queue.clear();
+      this.disableFmMode();
+      for (const song of tagged) this.queue.add(song);
+      const first = this.queue.play();
+      if (this.shouldShuffleCollection()) this.queue.followUnplayedListOrder();
+      if (first) await this.resolveAndPlay(first);
+      this.sweepLocalAudio("queue_replaced");
+      this.emit("stateChange");
+      return `Loaded ${tagged.length} songs. Now playing: ${first?.name ?? "unknown"}`;
+    }
+
+    const wasIdle = this.player.getState() === "idle";
+    const start = this.queue.size();
+    for (const song of tagged) this.queue.add(song);
+    if (wasIdle && this.queue.size() > start) {
+      this.queue.playAt(start);
+      this.player.resetFailures();
+      if (this.shouldShuffleCollection()) this.queue.followUnplayedListOrder();
+      await this.resolveAndPlay(this.queue.current()!);
+      this.emit("stateChange");
+      const started = this.queue.current();
+      return `Added ${tagged.length} songs. Now playing: ${started?.name ?? "unknown"}`;
+    }
+    if (this.shouldShuffleCollection()) this.queue.followUnplayedListOrder();
+    this.emit("stateChange");
+    return `Added ${tagged.length} songs to queue (position ${start + 1})`;
+  }
+
+  private async cmdPlaylist(
+    cmd: ParsedCommand,
+    requesterName?: string,
+    how: "replace" | "append" = "replace",
+  ): Promise<string> {
+    const usage = how === "append"
+      ? "Usage: !addplaylist <playlist name, ID or link>"
+      : "Usage: !playlist <playlist name, ID or link>";
+    if (!cmd.args) return usage;
 
     // A playlist link (#160) names its own platform, so it wins over flags.
     // App share short links are followed one hop to the real URL first.
@@ -1750,30 +1902,40 @@ export class BotInstance extends EventEmitter {
 
     const songs = await provider.getPlaylistSongs(playlistId);
     if (songs.length === 0) return "Playlist is empty or not found";
-
-    this.player.stop();
-    this.queue.clear();
-    this.disableFmMode();
-    for (const song of songs) {
-      this.queue.add(this.withRequester({ ...song, platform: provider.platform }, requesterName));
-    }
-    const first = this.queue.play();
-    if (first) await this.resolveAndPlay(first);
-    this.sweepLocalAudio("queue_replaced");
-    this.emit("stateChange");
-    return `Loaded ${songs.length} songs. Now playing: ${first?.name ?? "unknown"}`;
+    if (cmd.flags.has("a")) how = "append";
+    return this.commitCollection(songs, provider, requesterName, how);
   }
 
-  private async cmdAlbum(cmd: ParsedCommand, requesterName?: string): Promise<string> {
-    if (!cmd.args) return "Usage: !album <album name or ID>";
-    const provider = this.getProvider(cmd.flags);
+  private async cmdAlbum(
+    cmd: ParsedCommand,
+    requesterName?: string,
+    how: "replace" | "append" = "replace",
+  ): Promise<string> {
+    const usage = how === "append"
+      ? "Usage: !addalbum <album name, ID or link>"
+      : "Usage: !album <album name or ID>";
+    if (!cmd.args) return usage;
+
+    let ref = parseAlbumRef(cmd.args);
+    if (!ref) {
+      const shortLink = findShareShortLink(cmd.args);
+      if (shortLink) {
+        const target = await resolveShareLink(shortLink);
+        ref = target ? parseAlbumRef(target) : null;
+        if (!ref) return "Could not open that share link — paste the full album link or its ID instead";
+      }
+    }
+    if (ref) this.assertProviderEnabled(ref.platform);
+    const provider = ref ? this.getProviderFor(ref.platform) : this.getProvider(cmd.flags);
 
     const id = this.extractId(cmd.args);
     const isDirectId = this.looksLikeCollectionId(cmd.args);
 
     let albumId: string;
 
-    if (isDirectId || id !== cmd.args) {
+    if (ref) {
+      albumId = ref.id;
+    } else if (isDirectId || id !== cmd.args) {
       // Input is a direct ID (numeric / Jellyfin GUID) or URL containing an ID — use directly
       albumId = id;
     } else {
@@ -1787,18 +1949,40 @@ export class BotInstance extends EventEmitter {
 
     const songs = await provider.getAlbumSongs(albumId);
     if (songs.length === 0) return "Album is empty or not found";
+    if (cmd.flags.has("a")) how = "append";
+    return this.commitCollection(songs, provider, requesterName, how);
+  }
 
-    this.player.stop();
-    this.queue.clear();
-    this.disableFmMode();
-    for (const song of songs) {
-      this.queue.add(this.withRequester({ ...song, platform: provider.platform }, requesterName));
+  /** 记住默认音源。单条指令上的 -q / -n 仍然只对那一条生效。 */
+  private cmdSource(cmd: ParsedCommand): string {
+    const key = cmd.args.trim();
+    if (!key) {
+      return `Current source: ${defaultPlatform(this.config)}. Usage: ${this.config.commandPrefix}source netease|qq`;
     }
-    const first = this.queue.play();
-    if (first) await this.resolveAndPlay(first);
-    this.sweepLocalAudio("queue_replaced");
+    const platform = SOURCE_INPUT[key] ?? SOURCE_INPUT[key.toLowerCase()];
+    if (!platform) return `Usage: ${this.config.commandPrefix}source netease|qq  (pinyin: wangyiyun|qq)`;
+    this.assertProviderEnabled(platform);
+    this.config.defaultPlatform = platform as GateableProvider;
+    if (this.configPath) {
+      try {
+        saveConfig(this.configPath, this.config);
+      } catch (err) {
+        this.logger.warn({ err }, "Failed to persist default platform");
+      }
+    }
+    const label = platform === "qq" ? "qq" : "netease";
+    return `Default source set to ${label}. Commands without -q / -n use this source.`;
+  }
+
+  /** 打乱还没播的歌。正在唱的那首不停、也不换位置。 */
+  private cmdShuffle(): string {
+    if (this.queue.size() <= 1) return "Nothing left to shuffle";
+    const current = this.queue.getCurrentIndex();
+    if (current >= 0 && current >= this.queue.size() - 1) return "No upcoming songs to shuffle";
+    this.queue.shuffleUpcoming();
     this.emit("stateChange");
-    return `Loaded ${songs.length} songs. Now playing: ${first?.name ?? "unknown"}`;
+    const pending = current < 0 ? this.queue.size() : this.queue.size() - current - 1;
+    return `Shuffled ${pending} upcoming song(s). The current song stays.`;
   }
 
   private async cmdFm(cmd: ParsedCommand, requesterName?: string): Promise<string> {
@@ -2071,9 +2255,13 @@ export class BotInstance extends EventEmitter {
       `${p}vol <0-100>  — Set volume`,
       `${p}queue        — Show queue`,
       `${p}remove <pos> — Remove song at position (see ${p}queue)`,
-      `${p}mode <seq|loop|random|rloop> — Play mode`,
-      `${p}playlist <name or id> — Load playlist by name or ID`,
-      `${p}album <name or id> — Load album`,
+      `${p}mode <seq|loop|random|rloop> — Play mode (pinyin: shunxu / xunhuan / suiji / suijixunhuan)`,
+      `${p}source <netease|qq> — Default source (pinyin: ${p}yinyuan wangyiyun|qq)`,
+      `${p}playlist <name, id or url> — Replace the queue with a playlist. Random modes shuffle that load`,
+      `${p}album <name, id or url> — Replace the queue with an album`,
+      `${p}addplaylist <name, id or url> — Append a playlist (pinyin: ${p}tianjiagedan, or ${p}playlist -a)`,
+      `${p}addalbum <name, id or url> — Append an album (pinyin: ${p}tianjiazhuanji)`,
+      `${p}shuffle — Shuffle upcoming songs; the current song stays (pinyin: ${p}daluan)`,
       `${p}fm           — Personal FM (default source: ${def}; source flags work too)`,
       `${p}artist <name> — Play songs by artist (loop)`,
       ...(this.config.savedQueuesEnabled

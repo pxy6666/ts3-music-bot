@@ -35,6 +35,18 @@ describe("Command Parser", () => {
     expect(result!.args).toBe("稻香");
   });
 
+  it("accepts pinyin aliases and keeps the English command names", () => {
+    expect(parseCommand("!play 晴天", "!")!.name).toBe("play");
+    expect(parseCommand("!bofang 晴天", "!")!.name).toBe("play");
+    expect(parseCommand("!tianjiagedan 华语经典", "!")!.name).toBe("addplaylist");
+    expect(parseCommand("!tianjiazhuanji 范特西", "!")!.name).toBe("addalbum");
+    expect(parseCommand("!yinyuan wangyiyun", "!")!.name).toBe("source");
+    expect(parseCommand("!yinyuan wangyiyun", "!")!.args).toBe("wangyiyun");
+    expect(parseCommand("!daluan", "!")!.name).toBe("shuffle");
+    expect(parseCommand("!moshi suijixunhuan", "!")!.name).toBe("mode");
+    expect(parseCommand("!moshi suijixunhuan", "!")!.args).toBe("suijixunhuan");
+  });
+
   it("parses command with no args", () => {
     const result = parseCommand("!pause", "!");
     expect(result!.name).toBe("pause");

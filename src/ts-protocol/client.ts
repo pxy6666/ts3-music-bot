@@ -29,6 +29,7 @@ import {
   TrackingVoiceEndpointResolver,
   type ResolvedVoiceEndpoint,
 } from "./voice-endpoint.js";
+import { resolveTeamSpeakEndpoint } from "./server-address.js";
 
 export { CODEC_OPUS_MUSIC } from "./voice.js";
 export type { ServerProtocol } from "./protocol-detect.js";
@@ -150,10 +151,20 @@ export class TS3Client extends EventEmitter {
   private voiceFailureTimer: ReturnType<typeof setTimeout> | null = null;
   private voiceFailure: { code?: string; consecutiveFailures: number; startedAt: number } | null = null;
   private voiceEndpointResolver = new TrackingVoiceEndpointResolver();
+  /** Channel to rejoin on the next connect, then forget. Used after a drop. */
+  private pendingChannelId: string | undefined;
 
   constructor(private options: TS3ClientOptions, logger: Logger) {
     super();
     this.logger = logger;
+    const endpoint = resolveTeamSpeakEndpoint(options.host, options.port);
+    if (endpoint.host !== options.host || endpoint.port !== options.port) {
+      this.logger.info(
+        { address: options.host, port: options.port, host: endpoint.host, voicePort: endpoint.port },
+        "Address included a voice port; connecting with that port",
+      );
+      this.options = { ...options, host: endpoint.host, port: endpoint.port };
+    }
 
     if (options.identity) {
       this.identity = identityFromString(options.identity);
@@ -321,6 +332,15 @@ export class TS3Client extends EventEmitter {
       this.emit("disconnected");
     });
 
+    sdkClient.on("kicked", (reason: unknown) => {
+      if (!isCurrent()) return;
+      const message = typeof reason === "string" ? reason : "";
+      this.logger.warn({ reason: message }, "Kicked from TeamSpeak server");
+      // The library only notifies; it leaves the UDP session up. Close it so
+      // the bot follows the same disconnected path as a network drop.
+      sdkClient.disconnect().catch(() => {});
+    });
+
     sdkClient.on("clientEnter", (info: ClientInfo) => {
       if (!isCurrent()) return;
       this.rememberVisibleClientUid(info.id, info.uid);
@@ -369,8 +389,13 @@ export class TS3Client extends EventEmitter {
       `Logged in (visible client, ${this.detectedProtocol.toUpperCase()} server)`,
     );
 
-    // Join channel by numeric ID (takes precedence) or by name
-    if (this.options.channelId) {
+    // A channel remembered from before a drop wins once, without the
+    // configured channel's password (that password belongs to another room).
+    const rejoinChannelId = this.pendingChannelId;
+    this.pendingChannelId = undefined;
+    if (rejoinChannelId && rejoinChannelId !== this.options.channelId) {
+      await this.joinChannel(rejoinChannelId);
+    } else if (this.options.channelId) {
       await this.joinChannel(this.options.channelId, this.options.channelPassword);
     } else if (this.options.defaultChannel) {
       await this.joinChannel(
@@ -503,9 +528,18 @@ export class TS3Client extends EventEmitter {
     await fileTransferDeleteFile(this.client, channelID, paths);
   }
 
+  /** Rejoin this channel on the next connect instead of the configured one. */
+  preferChannel(channelId: string): void {
+    this.pendingChannelId = channelId;
+  }
+
   /** The server host (needed for file transfer TCP connections). */
   getHost(): string {
     return this.options.host;
+  }
+
+  getVoicePort(): number {
+    return this.options.port;
   }
 
   /** The current channel ID of this client. */

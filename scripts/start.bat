@@ -3,6 +3,15 @@ title TSMusicBot
 echo Starting TSMusicBot...
 echo.
 
+:: Resolve project root (one level up from scripts/)
+cd /d "%~dp0.."
+
+:: Prefer the Node 22 copied into .node by setup. System Node 24 cannot
+:: load the opus binary, and installing a C++ compiler is unnecessary.
+set "NODEHOME="
+if exist ".node\home.txt" for /f "usebackq delims=" %%i in (".node\home.txt") do set "NODEHOME=%%i"
+if exist "%NODEHOME%\node.exe" set "PATH=%NODEHOME%;%PATH%"
+
 :: Check if node is available
 where node >nul 2>&1
 if %errorlevel% neq 0 (
@@ -11,9 +20,6 @@ if %errorlevel% neq 0 (
     pause
     exit /b 1
 )
-
-:: Resolve project root (one level up from scripts/)
-cd /d "%~dp0.."
 
 :: Check if dependencies are installed
 if not exist "node_modules" (

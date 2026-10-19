@@ -743,3 +743,42 @@ describe("PlayQueue", () => {
     });
   });
 });
+
+describe("shuffle upcoming and follow list order", () => {
+  let queue: PlayQueue;
+
+  beforeEach(() => {
+    queue = new PlayQueue();
+  });
+
+  it("keeps the current song and only reorders what comes after it", () => {
+    queue.add(makeSong("A"));
+    queue.add(makeSong("B"));
+    queue.add(makeSong("C"));
+    queue.add(makeSong("D"));
+    queue.play();
+    const random = Math.random;
+    Math.random = () => 0;
+    try {
+      queue.shuffleUpcoming();
+    } finally {
+      Math.random = random;
+    }
+    expect(queue.current()?.id).toBe("A");
+    expect(queue.list().map((s) => s.id)).toEqual(["A", "C", "D", "B"]);
+  });
+
+  it("plays the tail in list order after followUnplayedListOrder", () => {
+    queue.setMode(PlayMode.Random);
+    queue.add(makeSong("A"));
+    queue.add(makeSong("B"));
+    queue.add(makeSong("C"));
+    queue.add(makeSong("D"));
+    queue.play();
+    queue.followUnplayedListOrder();
+    expect(queue.next()?.id).toBe("B");
+    expect(queue.next()?.id).toBe("C");
+    expect(queue.next()?.id).toBe("D");
+    expect(queue.next()).toBeNull();
+  });
+});

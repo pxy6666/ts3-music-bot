@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseSongRef, parseSelectionIndex, parsePlaylistRef, findShareShortLink, resolveShareLink } from "./song-ref.js";
+import { parseSongRef, parseSelectionIndex, parsePlaylistRef, parseAlbumRef, findShareShortLink, resolveShareLink } from "./song-ref.js";
 
 describe("parseSongRef (#90 exact-song selection)", () => {
   it("returns null for a plain search term", () => {
@@ -155,6 +155,25 @@ describe("parsePlaylistRef (#160 play a playlist from its link)", () => {
 
   it("finds the link inside an app's share text", () => {
     expect(parsePlaylistRef("分享某人创建的歌单「深夜」: https://y.music.163.com/m/playlist?id=123&userid=77 (来自@网易云音乐)")).toEqual({ id: "123", platform: "netease" });
+  });
+
+  it("does not treat a NetEase album link as a playlist", () => {
+    expect(parsePlaylistRef("https://music.163.com/album?id=123456")).toBeNull();
+    expect(parsePlaylistRef("https://music.163.com/#/album?id=123456")).toBeNull();
+  });
+});
+
+describe("parseAlbumRef", () => {
+  it("returns null for a name or a bare id", () => {
+    expect(parseAlbumRef("范特西")).toBeNull();
+    expect(parseAlbumRef("123456")).toBeNull();
+  });
+
+  it("parses NetEase and QQ album links", () => {
+    expect(parseAlbumRef("https://music.163.com/album?id=32311")).toEqual({ id: "32311", platform: "netease" });
+    expect(parseAlbumRef("https://music.163.com/#/album?id=32311")).toEqual({ id: "32311", platform: "netease" });
+    expect(parseAlbumRef("https://y.qq.com/n/ryqq/albumDetail/000MkMni19ClKu")).toEqual({ id: "000MkMni19ClKu", platform: "qq" });
+    expect(parseAlbumRef("[URL]https://y.qq.com/n/ryqq/album/001xAAxX2PTmC0[/URL]")).toEqual({ id: "001xAAxX2PTmC0", platform: "qq" });
   });
 });
 

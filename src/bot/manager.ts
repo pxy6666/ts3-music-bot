@@ -12,10 +12,17 @@ import { saveConfig, type BotConfig } from "../data/config.js";
 import type { Logger } from "../logger.js";
 
 import type { ServerProtocol } from "../ts-protocol/client.js";
+import { resolveTeamSpeakEndpoint } from "../ts-protocol/server-address.js";
 import type { AvatarStore } from "../data/avatars.js";
 import type { PermissionStore } from "../data/permissions.js";
 import type { SpotifyOAuth } from "../music/spotify/spotify-oauth.js";
 import { ManagedVoiceClientRegistry } from "./managed-voice-clients.js";
+
+function applyVoiceEndpoint<T extends { serverAddress: string; serverPort: number }>(saved: T): T {
+  const endpoint = resolveTeamSpeakEndpoint(saved.serverAddress, saved.serverPort);
+  if (endpoint.host === saved.serverAddress && endpoint.port === saved.serverPort) return saved;
+  return { ...saved, serverAddress: endpoint.host, serverPort: endpoint.port };
+}
 
 /**
  * Run bot.connect() with a hard deadline. If the handshake hangs (e.g. the
@@ -135,13 +142,17 @@ export class BotManager extends EventEmitter {
 
   async createBot(params: CreateBotParams): Promise<BotInstance> {
     const id = crypto.randomUUID();
+    const endpoint = applyVoiceEndpoint({
+      serverAddress: params.serverAddress,
+      serverPort: params.serverPort,
+    });
 
     const bot = new BotInstance({
       id,
       name: params.name,
       tsOptions: {
-        host: params.serverAddress,
-        port: params.serverPort,
+        host: endpoint.serverAddress,
+        port: endpoint.serverPort,
         queryPort: params.queryPort ?? 10011,
         nickname: params.nickname,
         defaultChannel: params.defaultChannel,
@@ -161,6 +172,7 @@ export class BotManager extends EventEmitter {
       jellyfinProvider: this.jellyfinProvider,
       database: this.database,
       config: this.config,
+      configPath: this.configPath,
       logger: this.logger,
       avatarStore: this.avatarStore,
       managedVoiceClients: this.managedVoiceClients,
@@ -174,8 +186,8 @@ export class BotManager extends EventEmitter {
     this.database.saveBotInstance({
       id,
       name: params.name,
-      serverAddress: params.serverAddress,
-      serverPort: params.serverPort,
+      serverAddress: endpoint.serverAddress,
+      serverPort: endpoint.serverPort,
       nickname: params.nickname,
       defaultChannel: params.defaultChannel ?? "",
       channelId: params.channelId ?? "",
@@ -212,11 +224,15 @@ export class BotManager extends EventEmitter {
     const existing = instances.find((i) => i.id === id);
     if (!existing) throw new Error(`Bot ${id} not found`);
 
+    const endpoint = applyVoiceEndpoint({
+      serverAddress: params.serverAddress ?? existing.serverAddress,
+      serverPort: params.serverPort ?? existing.serverPort,
+    });
     this.database.saveBotInstance({
       ...existing,
       name: params.name ?? existing.name,
-      serverAddress: params.serverAddress ?? existing.serverAddress,
-      serverPort: params.serverPort ?? existing.serverPort,
+      serverAddress: endpoint.serverAddress,
+      serverPort: endpoint.serverPort,
       nickname: params.nickname ?? existing.nickname,
       defaultChannel: params.defaultChannel ?? existing.defaultChannel,
       channelId: params.channelId ?? existing.channelId,
@@ -276,13 +292,14 @@ export class BotManager extends EventEmitter {
     // Reload config from database so updated settings (channel, nickname, etc.) take effect
     const saved = this.database.getBotInstances().find((i) => i.id === id);
     if (saved) {
-      const proto = saved.serverProtocol as "ts3" | "ts6" | "" | undefined;
+      const normalized = applyVoiceEndpoint(saved);
+      const proto = normalized.serverProtocol as "ts3" | "ts6" | "" | undefined;
       const bot = new BotInstance({
-        id: saved.id,
-        name: saved.name,
+        id: normalized.id,
+        name: normalized.name,
         tsOptions: {
-          host: saved.serverAddress,
-          port: saved.serverPort,
+          host: normalized.serverAddress,
+          port: normalized.serverPort,
           queryPort: proto === "ts6" ? 10080 : 10011,
           nickname: saved.nickname,
           // Reuse the stored identity so server groups assigned to this bot
@@ -306,6 +323,7 @@ export class BotManager extends EventEmitter {
         jellyfinProvider: this.jellyfinProvider,
         database: this.database,
         config: this.config,
+        configPath: this.configPath,
         logger: this.logger,
         avatarStore: this.avatarStore,
         managedVoiceClients: this.managedVoiceClients,
@@ -315,9 +333,10 @@ export class BotManager extends EventEmitter {
       this.bots.set(id, bot);
       this.emit("botInstance", bot);
       await connectWithTimeout(bot, 15_000, this.logger);
-      // Mark as autoStart so it reconnects on Docker restart, and persist identity
-      this.database.saveBotInstance({ ...saved, autoStart: true });
-      this.persistBotIdentity(saved, bot);
+      // Mark as autoStart so it reconnects on Docker restart, and persist identity.
+      // Also store the split host/port when the address box contained "host:port".
+      this.database.saveBotInstance({ ...normalized, autoStart: true });
+      this.persistBotIdentity(normalized, bot);
     } else {
       await connectWithTimeout(oldBot, 15_000, this.logger);
     }
@@ -337,7 +356,11 @@ export class BotManager extends EventEmitter {
 
   async loadSavedBots(): Promise<void> {
     const savedInstances = this.database.getBotInstances();
-    for (const saved of savedInstances) {
+    for (const row of savedInstances) {
+      const saved = applyVoiceEndpoint(row);
+      if (saved.serverAddress !== row.serverAddress || saved.serverPort !== row.serverPort) {
+        this.database.saveBotInstance(saved);
+      }
       const proto = saved.serverProtocol as "ts3" | "ts6" | "" | undefined;
       const bot = new BotInstance({
         id: saved.id,
@@ -365,6 +388,7 @@ export class BotManager extends EventEmitter {
         jellyfinProvider: this.jellyfinProvider,
         database: this.database,
         config: this.config,
+        configPath: this.configPath,
         logger: this.logger,
         avatarStore: this.avatarStore,
         managedVoiceClients: this.managedVoiceClients,

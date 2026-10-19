@@ -5,6 +5,10 @@
 <h1 align="center">TSMusicBot</h1>
 
 <p align="center">
+  本仓库基于 <a href="https://github.com/ZHANGTIANYAO1/teamspeak-music-bot">ZHANGTIANYAO1/teamspeak-music-bot</a> 修改，上游协议为 MIT。修改说明、依赖协议，以及不上传登录信息的约定见 <a href="来源与协议.md">来源与协议</a>。
+</p>
+
+<p align="center">
   <strong>TeamSpeak 音乐机器人</strong> — 网易云音乐 + QQ 音乐 + 酷狗音乐 + 哔哩哔哩 + YouTube（可选），Jellyfin / Spotify 可选启用，YesPlayMusic 风格 WebUI 控制面板
 </p>
 
